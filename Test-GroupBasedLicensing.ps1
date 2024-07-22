@@ -74,22 +74,23 @@ Try {
 $PlaceHolderRemoval = "RemoveDuplicateEntry"
 Foreach ($grp in (($ExpectedLicenseDetails | Group-Object GroupGUID).Name)) {
     # Defaulting used variables on each run
-    $Group = $null
-    $DuplicateSku = $null
-    $DuplicateLines = $null
-    $CombinedEnabledPlans = $null
+    $Group, $DuplicateSku, $DuplicateLines, $CombinedEnabledPlans = $null, $null, $null, $null
 
     # Foreach unique GroupGUID entry in the CSV file, find all entries
     $Group = $ExpectedLicenseDetails | Where-Object { $_.GroupGUID -eq $grp }
+
     # For these entries, group based on SkuID and confirm if there is more than 1 entry
     $DuplicateSku = $Group | Group-Object SkuID | Where-Object { $_.Count -ge 2 }
+
     # If we found at least 1 Duplicate Sku in the input file
     If ($DuplicateSku) {
         # This probably happens when people add new lines to the input-file as opposed to modifying the existing EnabledPlans column of the existing line
         Foreach ($DS in $DuplicateSku) {
             # "Found a duplicate entry in the input file for GroupGUID '$($GroupGUID)' and SkuID '$($DS.Name)', combining the list of EnabledPlans"
+
             # Create a list of the lines that are duplicate
             $DuplicateLines = $ExpectedLicenseDetails | Where-Object { $_.SkuId -eq $DS.Name }
+
             # Confirm if any of the lines contains a wildcard
             If ([bool]($DuplicateLines.EnabledPlans -match '\*') -eq $true) {
                 # One of the Lines contains a * (wildcard) in the EnabledPlans. Define the CombinedPlans as a single '*', no need to combine a wildcard with other enabled plans
@@ -98,12 +99,14 @@ Foreach ($grp in (($ExpectedLicenseDetails | Group-Object GroupGUID).Name)) {
                 # Create a new list of Enabled Plans that combines the multiple lines and deduplicates the entries
                 $CombinedEnabledPlans = (($DuplicateLines.EnabledPlans -Join ',').Split(',') | Foreach-Object { $_.Trim() } | Sort-Object -Unique) -Join ','
             }
+
             # Add a new entry to the full input list
             $ExpectedLicenseDetails += [PSCustomObject]@{
                 GroupGuid = $grp
                 skuID = $DS.Name
                 EnabledPlans = $CombinedEnabledPlans
             }
+
             #region Run through the input list of the possible duplicate entries
             # First up, entries that have a different value EnabledPlans
             Foreach ($entry in ($ExpectedLicenseDetails | Where-Object { $_.GroupGUID -eq $grp -and $_.SkuID -eq $DS.Name })) {
@@ -116,7 +119,7 @@ Foreach ($grp in (($ExpectedLicenseDetails | Group-Object GroupGUID).Name)) {
             If ((($ExpectedLicenseDetails | Where-Object { $_.GroupGUID -eq $grp -and $_.SkuID -eq $DS.Name }) | Group-Object EnabledPlans).Count -gt 1) {
                 # We found duplicate entries where the end-to-end line is the same, in a While-loop we modify the all lines EXCEPT the first entry (0)
                 While ((($ExpectedLicenseDetails | Where-Object { $_.GroupGUID -eq $grp -and $_.SkuID -eq $DS.Name -and $_.EnabledPlans -eq $CombinedEnabledPlans }) | Group-Object EnabledPlans).Count -ge 2) {
-                    ($ExpectedLicenseDetails | Where-Object { $_.GroupGUID -eq $grp -and $_.SkuID -eq $DS.Name -and $_.EnabledPlans -eq $CombinedEnabledPlans })[1].EnabledPlans = $PlaceHolderRemoval
+                    ($ExpectedLicenseDetails | Where-Object { $_.GroupGUID -eq $grp -and $_.SkuID -eq $DS.Name -and $_.EnabledPlans -eq $CombinedEnabledPlans } | Select-Object -First 1 -Skip 1).EnabledPlans = $PlaceHolderRemoval
                 }
             }
             #endregion
@@ -129,7 +132,7 @@ Foreach ($grp in (($ExpectedLicenseDetails | Group-Object GroupGUID).Name)) {
 
 #region Fetch all licenses known in the Directory
 Try {
-    $DirectoryLicenses = Invoke-RestMethod -Method GET -Headers @{Authorization = "Bearer $($AccessToken)"} -Uri 'https://graph.microsoft.com/v1.0/subscribedSkus?$select=id,skuId,skuPartNumber,prepaidUnits,consumedUnits,servicePlans' -ErrorAction Stop
+    $DirectoryLicenses = Invoke-RestMethod -Method GET -Headers @{Authorization = "$($AuthResponse.token_type) $($AuthResponse.access_token)"} -Uri 'https://graph.microsoft.com/v1.0/subscribedSkus?$select=id,skuId,skuPartNumber,prepaidUnits,consumedUnits,servicePlans' -ErrorAction Stop
 } Catch {
     Throw "Could not retrieve the Directory Licenses, and as a result unable to complete"
 }
@@ -138,10 +141,7 @@ Try {
 #region Foreach entry of input file, fetch the current assigned licenses and match DisabledPlans with expectation
 Foreach ($ELD in $ExpectedLicenseDetails) {
     # Defaulting variables on each run
-    $ConfiguredLicense = $null
-    $AvailablePlans = $null
-    $DisabledPlans = $null
-    $Scope = $null
+    $ConfiguredLicense, $AvailablePlans, $DisabledPlans, $Scope = $null, $null, $null, $null
 
     Write-Host " "
     Write-Host "Working on entry for Group '$($ELD.GroupGuid)' Sku '$($ELD.SkuId)' and Enabled Plans: $($ELD.EnabledPlans)"
@@ -149,9 +149,10 @@ Foreach ($ELD in $ExpectedLicenseDetails) {
     # Retrieve the current assigned licenses for the group
     Try {
         # Format URI as String in single quotes to avoid the need of escaping special characters.
-        $URI = 'https://graph.microsoft.com/beta/groups/{0}?$select=Id, AssignedLicenses' -f $ELD.GroupGUID
+        $URI = 'https://graph.microsoft.com/beta/groups/{0}?$select=Id,AssignedLicenses' -f $ELD.GroupGUID
+
         # API call to Get the assigned licenses for the group
-        $ConfiguredLicense = Invoke-RestMethod -Method GET -Headers @{Authorization = "Bearer $($AccessToken)"} -Uri $URI -ErrorAction Stop
+        $ConfiguredLicense = Invoke-RestMethod -Method GET -Headers @{Authorization = "$($AuthResponse.token_type) $($AuthResponse.access_token)"} -Uri $URI -ErrorAction Stop
     } Catch {
         $ConfiguredLicense = $null
         Write-Verbose "    Could not retrieve configured licenses for group $($ELD.GroupGUID)"
@@ -161,6 +162,7 @@ Foreach ($ELD in $ExpectedLicenseDetails) {
     If ($ConfiguredLicense) {
         # Set the scope for the current iteration based on the Sku in question, as a group can be used to write multiple licenses
         $Scope = $ConfiguredLicense.AssignedLicenses | Where-Object {$_.skuId -eq $ELD.skuId }
+
         If (-Not $Scope) {
             $Scope = $null
             Write-Verbose "    Could not find the expected license on the group based on SkuID: $($ELD.skuID)"
@@ -183,6 +185,7 @@ Foreach ($ELD in $ExpectedLicenseDetails) {
                 # DisabedPlans is a list of All Available Plans without the ones listed explicitly as being Enabled
                 Try {
                     $DisabledPlans = $AvailablePlans.servicePlanId | Where-Object { $_ -notin $ELD.EnabledPlans.Split(',') }
+ 
                     If ($null -eq $DisabledPlans) {
                         # When there're no disabled plans, we just return an empty array
                         $DisabledPlans = @()
